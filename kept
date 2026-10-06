@@ -1,0 +1,28 @@
+# What a trimmed commit keeps of the upstream commit it is made from, and all of it has to be
+# there: an upstream commit that lacks anything named here is refused, not trimmed without it.
+#
+# With every backend off, Dawn's root `CMakeLists.txt` adds `third_party`, `src/utils` and
+# `src/tint` and no other directory, and the three gitlinks are what Tint builds from. A newer Dawn
+# may read a file this list does not name; that shows when Tint is configured, and the answer is a
+# line here and a commit made again.
+#
+#   tree     a directory, kept whole
+#   file     one file
+#   gitlink  one submodule entry, kept at the commit upstream pins
+
+tree     src/cmake
+tree     src/tint
+tree     src/utils
+
+file     .gitattributes
+file     .gitignore
+file     .gitmodules
+file     AUTHORS
+file     CMakeLists.txt
+file     LICENSE
+file     README.md
+file     third_party/CMakeLists.txt
+
+gitlink  third_party/abseil-cpp
+gitlink  third_party/spirv-headers/src
+gitlink  third_party/spirv-tools/src

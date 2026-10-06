@@ -1,0 +1,3 @@
+# Line feeds everywhere, whatever a clone's `core.autocrlf` says: the tool compares its own files
+# with the committed ones, and a script whose first line ends in a carriage return does not start.
+* text eol=lf
