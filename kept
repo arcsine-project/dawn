@@ -15,6 +15,11 @@ tree     src/cmake
 tree     src/tint
 tree     src/utils
 
+# Tint's public header. Tint's own build reads no file of it, and Dawn's root `CMakeLists.txt`
+# names `include` as an include directory all the same: with the directory gone, every compile
+# under Dawn's `-Weverything` warns that it is missing, 386 times in a build on Linux.
+tree     include/tint
+
 file     .gitattributes
 file     .gitignore
 file     .gitmodules

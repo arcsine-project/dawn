@@ -73,7 +73,7 @@ python3 tint_only.py init --upstream <full commit id>
 
 | File | What it is |
 | --- | --- |
-| `kept` | what a trimmed commit keeps of the upstream commit (three directories, seven files, three gitlinks), and the one path whose text is ours |
+| `kept` | what a trimmed commit keeps of the upstream commit (four directories, seven files, three gitlinks), and the one path whose text is ours |
 | `tint-only.README.md` | that text: the `README.md` of `tint-only` |
 | `tint_only.py` | `init`, `sync`, `remake`, `verify`, `test` |
 | `tint_only_cases.py` | the cases that hold each refusal, on repositories built for the purpose |
