@@ -14,7 +14,7 @@ This is not where to get Dawn, and nothing is developed here. For the project it
 
 | Path | What it is |
 | --- | --- |
-| `src/tint`, `src/utils`, `src/cmake` | upstream's directories, whole |
+| `src/tint`, `src/utils`, `src/cmake`, `include/tint` | upstream's directories, whole |
 | `CMakeLists.txt`, `third_party/CMakeLists.txt` | upstream's build files, unedited |
 | `third_party/abseil-cpp`, `third_party/spirv-headers/src`, `third_party/spirv-tools/src` | submodules, at the commits upstream pins |
 | `LICENSE`, `AUTHORS` | upstream's, and they cover everything here but this file |
