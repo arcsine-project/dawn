@@ -75,6 +75,9 @@ class Fixture:
             first[path] = Entry("100644", "blob", one, path)
         for path in self.recipe.gitlinks:
             first[path] = Entry("160000", "commit", LINK_ONE, path)
+        # Upstream has a file of its own wherever this fork writes one, as Dawn has a `README.md`.
+        for path, _ in self.recipe.ours:
+            first[path] = Entry("100644", "blob", one, path)
         for path in ("test/tint/case.wgsl", "third_party/unnamed.cmake", "tools/run.py"):
             first[path] = Entry("100644", "blob", one, path)
         first["third_party/angle"] = Entry("160000", "commit", LINK_ONE, "third_party/angle")
@@ -97,10 +100,17 @@ class Fixture:
         self.up.git("update-ref", f"refs/tags/{TAG}", self.u2)
         self.up.git("update-ref", f"refs/tags/{SHORT_TAG}", self.u_short)
 
-        # The revision a trimmed commit records: a commit that carries the list.
+        # The revision a trimmed commit records: a commit that carries the list and the texts it
+        # names. And one that carries the list alone, which a commit cannot be checked against.
         blob = self.work.git("hash-object", "-w", "--stdin", stdin=text.encode("utf-8"))
-        self.revision = self._commit(
-            self.work, [Entry("100644", "blob", blob, tint_only.KEPT)], [], "the tool")
+        tool = [Entry("100644", "blob", blob, tint_only.KEPT)]
+        self.bare_revision = self._commit(self.work, tool, [], "the list without its texts")
+        for source in self.recipe.sources():
+            with open(os.path.join(tint_only.HERE, source), "rb") as written:
+                tool.append(Entry("100644", "blob", self.work.git(
+                    "hash-object", "-w", "--stdin", stdin=written.read()), source))
+        self.revision = self._commit(self.work, tool, [], "the tool")
+        self.kept_text = text
 
         self.t1, _ = tint_only.init(self.work, self.u1, self.revision, self.recipe,
                                     upstream_url=self.up_url)
@@ -123,8 +133,8 @@ class Fixture:
 
     def kept(self, upstream: str) -> Dict[str, Entry]:
         """What a correct trim of `upstream` holds, to be changed by a case."""
-        return {path: entry for path, entry in tint_only.listing(self.work, upstream).items()
-                if self.recipe.allows(entry)}
+        return {entry.path: entry for entry in tint_only.recipe_entries(
+            self.work, upstream, self.recipe, self.revision)}
 
     def candidate(self, upstream: str, parents: Sequence[str],
                   change: Optional[Callable[[Dict[str, Entry]], None]] = None,
@@ -244,6 +254,43 @@ def a_path_outside_the_list_kept(f: Fixture) -> None:
     f.refused(f.candidate(f.u1, [f.u1], change), FIRST, ["composition"])
 
 
+# --- the file of this fork's own ----------------------------------------------------------------
+
+def our_file_with_another_text(f: Fixture) -> None:
+    path = f.recipe.ours[0][0]
+
+    def change(entries):
+        entries[path] = Entry("100644", "blob", f.other_blob, path)
+    f.refused(f.candidate(f.u1, [f.u1], change), FIRST, ["ours"])
+
+
+def upstreams_file_where_ours_belongs(f: Fixture) -> None:
+    path = f.recipe.ours[0][0]
+
+    def change(entries):
+        entries[path] = f.from_upstream(f.u1, path)
+    f.refused(f.candidate(f.u1, [f.u1], change), FIRST, ["ours"])
+
+
+def our_file_with_another_mode(f: Fixture) -> None:
+    path = f.recipe.ours[0][0]
+
+    def change(entries):
+        entries[path] = Entry("100755", "blob", entries[path].id, path)
+    f.refused(f.candidate(f.u1, [f.u1], change), FIRST, ["ours"])
+
+
+def our_file_absent(f: Fixture) -> None:
+    path = f.recipe.ours[0][0]
+    f.refused(f.candidate(f.u1, [f.u1], lambda entries: entries.pop(path)), FIRST, ["composition"])
+
+
+def a_recipe_without_the_text_it_names(f: Fixture) -> None:
+    message = tint_only.describe(f.u1, None, f.bare_revision)
+    f.refused(f.candidate(f.u1, [f.u1], message=message), FIRST, ["record"])
+    must_refuse(lambda: tint_only.recipe_tree(f.work, f.u1, f.recipe, f.bare_revision), "has no")
+
+
 # --- parents and the record ---------------------------------------------------------------------
 
 def a_first_commit_with_two_parents(f: Fixture) -> None:
@@ -348,26 +395,77 @@ def a_tool_that_differs_from_the_committed_one(f: Fixture) -> None:
     tool = new_repo(directory)
     Fixture._identity(tool)
     must_refuse(lambda: tint_only.tool_revision(directory), "no revision")
-    for name in tint_only.TOOL_FILES:
+    texts = f.recipe.sources()
+    for name in (*tint_only.TOOL_FILES, *texts):
         shutil.copyfile(os.path.join(tint_only.HERE, name), os.path.join(directory, name))
     tool.git("add", "--", *tint_only.TOOL_FILES[:-1])
     tool.git("commit", "--quiet", "-m", "without the list", env=WHO)
-    must_refuse(lambda: tint_only.tool_revision(directory), "is not committed")
+    must_refuse(lambda: tint_only.tool_revision(directory), f"{tint_only.KEPT} is not committed")
     tool.git("add", "--", tint_only.KEPT)
-    tool.git("commit", "--quiet", "-m", "with it", env=WHO)
+    tool.git("commit", "--quiet", "-m", "with it, without the text it names", env=WHO)
+    must_refuse(lambda: tint_only.tool_revision(directory), f"{texts[0]} is not committed")
+    tool.git("add", "--", *texts)
+    tool.git("commit", "--quiet", "-m", "with both", env=WHO)
     if tint_only.tool_revision(directory) != tool.git("rev-parse", "HEAD"):
         raise AssertionError("a committed tool did not answer with its commit")
+    with open(os.path.join(directory, texts[0]), "a", encoding="utf-8", newline="\n") as written:
+        written.write("one more line\n")
+    must_refuse(lambda: tint_only.tool_revision(directory), f"{texts[0]} differs")
+    tool.git("commit", "--quiet", "-am", "the text, a line longer", env=WHO)
     with open(os.path.join(directory, tint_only.KEPT), "a", encoding="utf-8", newline="\n") as kept:
         kept.write("file     tools/run.py\n")
-    must_refuse(lambda: tint_only.tool_revision(directory), "differs from the committed one")
+    must_refuse(lambda: tint_only.tool_revision(directory), f"{tint_only.KEPT} differs")
 
 
 def a_list_that_is_not_one(f: Fixture) -> None:
     for text, said in (("folder src/tint\n", "expected"), ("file a b\n", "expected"),
                        ("file LICENSE\nfile LICENSE\n", "named twice"),
                        ("tree src/tint/\n", "not a path"), ("file ../LICENSE\n", "not a path"),
-                       ("tree src\nfile src/a.cc\n", "kept whole"), ("# nothing\n", "names nothing")):
+                       ("tree src\nfile src/a.cc\n", "kept whole"), ("# nothing\n", "names nothing"),
+                       ("ours README.md\n", "expected"), ("ours README.md sub/text.md\n", "beside"),
+                       ("file README.md\nours README.md text.md\n", "named twice")):
         must_refuse(lambda text=text: tint_only.parse_recipe(text), said)
+
+
+def a_tip_that_is_not_a_trimmed_commit_is_not_made_again(f: Fixture) -> None:
+    plain = new_repo(os.path.join(os.path.dirname(f.work.path), "plain"))
+    commit = Fixture._commit(plain, [Entry("100644", "blob", plain.git(
+        "hash-object", "-w", "--stdin", stdin=b"a file\n"), "a.txt")], [], "an ordinary commit")
+    must_refuse(lambda: tint_only.remake(plain, f.revision, f.recipe, upstream_url=f.up_url),
+                "there is no tint-only")
+    plain.git("update-ref", tint_only.BRANCH, commit)
+    must_refuse(lambda: tint_only.remake(plain, f.revision, f.recipe, upstream_url=f.up_url),
+                "not a trimmed commit")
+
+
+def the_same_upstream_made_again_by_another_list(f: Fixture) -> None:
+    """Last of the cases, since it moves the branch: a line added to the list, upstream as it was."""
+    before = tint_only.read_commit(f.work, tint_only.BRANCH)
+    must_refuse(lambda: tint_only.remake(f.work, f.revision, f.recipe, upstream_url=f.up_url),
+                "nothing to make")
+
+    text = f.kept_text + "file     third_party/unnamed.cmake\n"
+    tool = [Entry("100644", "blob", f.work.git("hash-object", "-w", "--stdin", stdin=text.encode()),
+                  tint_only.KEPT)]
+    tool += [entry for path, entry in tint_only.listing(f.work, f.revision).items()
+             if path != tint_only.KEPT]
+    longer = Fixture._commit(f.work, tool, [f.revision], "the list, a line longer")
+    commit, _ = tint_only.remake(f.work, longer, tint_only.parse_recipe(text), upstream_url=f.up_url)
+
+    made = tint_only.read_commit(f.work, commit)
+    if made.parents != (before.id, before.parents[-1]):
+        raise AssertionError(f"its parents are {made.parents}, and they were to be the tip before "
+                             f"and that tip's upstream")
+    if made.trailers("Upstream-tag") != before.trailers("Upstream-tag") or not made.trailers("Upstream-tag"):
+        raise AssertionError("the tag the tip was asked for by was not carried over")
+    if "third_party/unnamed.cmake" not in tint_only.listing(f.work, commit):
+        raise AssertionError("the line added to the list kept nothing")
+    if tint_only.read_commit(f.work, tint_only.BRANCH).id != commit:
+        raise AssertionError("the branch does not name the commit made again")
+    f.passes(commit, before.id, prove=True)
+    f.passes(commit, None)
+    # And the one before it is still held to the list that made it, a line shorter.
+    f.passes(before.id, None)
 
 
 CASES: Tuple[Callable[[Fixture], None], ...] = (
@@ -383,6 +481,11 @@ CASES: Tuple[Callable[[Fixture], None], ...] = (
     a_nested_gitlink_naming_another_commit,
     a_fourth_gitlink_kept,
     a_path_outside_the_list_kept,
+    our_file_with_another_text,
+    upstreams_file_where_ours_belongs,
+    our_file_with_another_mode,
+    our_file_absent,
+    a_recipe_without_the_text_it_names,
     a_first_commit_with_two_parents,
     a_later_commit_with_one_parent,
     the_parents_in_the_other_order,
@@ -400,6 +503,8 @@ CASES: Tuple[Callable[[Fixture], None], ...] = (
     a_branch_that_moved_meanwhile,
     a_tool_that_differs_from_the_committed_one,
     a_list_that_is_not_one,
+    a_tip_that_is_not_a_trimmed_commit_is_not_made_again,
+    the_same_upstream_made_again_by_another_list,
 )
 
 
@@ -414,8 +519,11 @@ def run(verbose: bool = False) -> List[str]:
     try:
         try:
             fixture = Fixture(root)
-        except (Refused, tint_only.GitFailed, AssertionError) as failure:
-            return [f"the pair every case starts from could not be made: {failure}"]
+        except Exception as failure:  # pylint: disable=broad-except
+            said = f"the pair every case starts from could not be made: {failure}"
+            if verbose:
+                print(f"  FAILED  {said}")
+            return [said]
         for case in CASES:
             name = case.__name__.replace("_", " ")
             try:

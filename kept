@@ -4,11 +4,12 @@
 # With every backend off, Dawn's root `CMakeLists.txt` adds `third_party`, `src/utils` and
 # `src/tint` and no other directory, and the three gitlinks are what Tint builds from. A newer Dawn
 # may read a file this list does not name; that shows when Tint is configured, and the answer is a
-# line here and a commit made again.
+# line here and `remake`.
 #
 #   tree     a directory, kept whole
 #   file     one file
 #   gitlink  one submodule entry, kept at the commit upstream pins
+#   ours     a path whose text is this fork's, and the file beside this list that holds it
 
 tree     src/cmake
 tree     src/tint
@@ -20,9 +21,13 @@ file     .gitmodules
 file     AUTHORS
 file     CMakeLists.txt
 file     LICENSE
-file     README.md
 file     third_party/CMakeLists.txt
 
 gitlink  third_party/abseil-cpp
 gitlink  third_party/spirv-headers/src
 gitlink  third_party/spirv-tools/src
+
+# The one file on `tint-only` that is not upstream's: the page GitHub shows for the repository.
+# Dawn's own `README.md` describes the whole of Dawn, and its logo and its links into `docs/` point
+# at paths that are deleted there.
+ours     README.md    tint-only.README.md

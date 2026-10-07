@@ -3,13 +3,16 @@
 
     python3 tint_only.py init --upstream <sha>    # the first trimmed commit, once
     python3 tint_only.py sync <tag>               # a later one, from one of Dawn's release tags
+    python3 tint_only.py remake                   # the tip's upstream again, after `kept` changed
     python3 tint_only.py verify [<commit>]        # check a trimmed commit; `tint-only` by default
     python3 tint_only.py test                     # the cases that hold each refusal
 
-**A trimmed commit is the upstream commit with paths removed, and nothing else.** Its last parent is
-that upstream commit, so plain git answers where it came from with no tool of ours:
-`git diff --name-status --no-renames <upstream> <trimmed>` prints nothing but `D`. That is why this
-file lives on a branch of its own and not on `tint-only`: nothing authored is in a trimmed commit.
+**A trimmed commit is the upstream commit with paths removed, and one file of this fork's own: the
+`README.md` GitHub shows for the repository.** Its last parent is that upstream commit, so plain git
+answers where it came from with no tool of ours: `git diff --name-status --no-renames <upstream>
+<trimmed>` prints `D` on every line but that one. The text of the file is `tint-only.README.md` on
+this branch, at the revision a trimmed commit records, so it too is an object a check can name.
+Everything else authored here -- this tool, its cases, the list -- stays off `tint-only`.
 
 **`sync` rebuilds and never merges.** It takes the tree of the commit the tag names, keeps what
 `kept` lists, and writes that as a commit whose parents are the tip `tint-only` had and the upstream
@@ -18,9 +21,9 @@ that only moves forward; no content is merged, so nothing `kept` does not name c
 
 **What is checked is that a commit is a correct trim, not that Tint builds from it.** A list one
 file short shows when Tint is configured and nowhere earlier; the answer is a line in `kept`, a
-commit of this branch, and `sync` again over the same upstream commit.
+commit of this branch, and `remake`, which trims the same upstream commit again.
 
-`init` and `sync` run the cases first, build the commit, check it by the rules `verify` holds, and
+`init`, `sync` and `remake` run the cases first, build the commit, check it by the rules `verify` holds, and
 only then move the local branch -- and only if it still names the commit it named when they began.
 They refuse to run from a tool or a list that differs from the committed one, since the revision a
 trimmed commit records has to be the recipe that made it.
@@ -36,6 +39,10 @@ import subprocess
 import sys
 import tempfile
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+# No `__pycache__` beside the tool: this directory is the checkout of a branch, and what is in it
+# is what the branch holds.
+sys.dont_write_bytecode = True
 
 UPSTREAM = "https://dawn.googlesource.com/dawn"
 # Dawn's release tags are cut on its GitHub mirror alone; the commits they name are upstream's.
@@ -105,18 +112,28 @@ class Entry:
 
 @dataclasses.dataclass(frozen=True)
 class Recipe:
-    """What `kept` names. A gitlink is kept by its own name alone, never for being under a tree."""
+    """What `kept` names. A gitlink is kept by its own name alone, never for being under a tree.
+
+    `ours` is the other kind of line: a path on `tint-only` whose text is this fork's and not
+    upstream's, with the file on the tool's branch that holds the text. Whatever upstream has at
+    such a path is not taken.
+    """
     trees: Tuple[str, ...]
     files: Tuple[str, ...]
     gitlinks: Tuple[str, ...]
+    ours: Tuple[Tuple[str, str], ...] = ()
 
     def allows(self, entry: Entry) -> bool:
+        """Whether a trimmed commit takes this entry of upstream's."""
         if entry.kind == "commit":
             return entry.path in self.gitlinks
         return entry.path in self.files or entry.path.startswith(tuple(t + "/" for t in self.trees))
 
     def named(self) -> List[str]:
         return [*self.trees, *self.files, *self.gitlinks]
+
+    def sources(self) -> List[str]:
+        return [source for _, source in self.ours]
 
     def absent(self, entries: Iterable[Entry]) -> List[str]:
         """Every named path `entries` does not have, a tree counting as there by one file in it."""
@@ -131,28 +148,43 @@ class Recipe:
 
 def parse_recipe(text: str) -> Recipe:
     named: Dict[str, List[str]] = {"tree": [], "file": [], "gitlink": []}
+    ours: List[Tuple[str, str]] = []
     seen = set()
+
+    def inside(path: str) -> bool:
+        return not (path.startswith("/") or path.endswith("/") or ".." in path.split("/")
+                    or "\\" in path)
+
     for number, line in enumerate(text.splitlines(), 1):
         line = line.split("#", 1)[0].strip()
         if not line:
             continue
         parts = line.split()
-        if len(parts) != 2 or parts[0] not in named:
-            raise Refused(f"{KEPT}, line {number}: expected `tree`, `file` or `gitlink` and one path")
-        kind, path = parts
-        if path.startswith("/") or path.endswith("/") or ".." in path.split("/") or "\\" in path:
+        if parts[0] == "ours" and len(parts) == 3:
+            kind, path, source = parts
+            if not inside(source) or "/" in source:
+                raise Refused(f"{KEPT}, line {number}: {source} is not a file beside this list")
+        elif len(parts) == 2 and parts[0] in named:
+            kind, path = parts
+        else:
+            raise Refused(f"{KEPT}, line {number}: expected `tree`, `file` or `gitlink` and one "
+                          f"path, or `ours`, a path and the file that holds its text")
+        if not inside(path):
             raise Refused(f"{KEPT}, line {number}: {path} is not a path inside the repository")
         if path in seen:
             raise Refused(f"{KEPT}, line {number}: {path} is named twice")
         seen.add(path)
-        named[kind].append(path)
+        if kind == "ours":
+            ours.append((path, source))
+        else:
+            named[kind].append(path)
     for tree in named["tree"]:
         inside = [path for path in seen if path.startswith(tree + "/")]
         if inside:
             raise Refused(f"{KEPT}: {inside[0]} is inside the tree {tree}, which is kept whole")
     if not seen:
         raise Refused(f"{KEPT} names nothing")
-    return Recipe(tuple(named["tree"]), tuple(named["file"]), tuple(named["gitlink"]))
+    return Recipe(tuple(named["tree"]), tuple(named["file"]), tuple(named["gitlink"]), tuple(ours))
 
 
 def listing(repo: Repo, commit: str, paths: Sequence[str] = ()) -> Dict[str, Entry]:
@@ -193,13 +225,30 @@ def write_tree(repo: Repo, entries: Iterable[Entry]) -> str:
                 os.unlink(left)
 
 
-def recipe_tree(repo: Repo, upstream: str, recipe: Recipe) -> str:
-    """The tree the list makes of `upstream`; refused when upstream lacks anything it names."""
+def our_entries(repo: Repo, recipe: Recipe, revision: str) -> List[Entry]:
+    """The files of this fork's own a trimmed commit carries, as `revision` of the tool's branch
+    has them: an ordinary file each, whatever mode upstream gave the path."""
+    entries = []
+    for path, source in recipe.ours:
+        found = repo.run("rev-parse", "--verify", "--quiet", f"{revision}:{source}")
+        if found.returncode != 0:
+            raise Refused(f"revision {revision[:12]} of the tool's branch has no {source}, which "
+                          f"{KEPT} names as the text of {path}")
+        entries.append(Entry("100644", "blob", found.stdout.decode().strip(), path))
+    return entries
+
+
+def recipe_entries(repo: Repo, upstream: str, recipe: Recipe, revision: str) -> List[Entry]:
+    """What a trimmed commit of `upstream` holds; refused when upstream lacks anything named."""
     kept = [entry for entry in listing(repo, upstream).values() if recipe.allows(entry)]
     absent = recipe.absent(kept)
     if absent:
         raise Refused(f"upstream {upstream[:12]} lacks what {KEPT} names: {', '.join(absent)}")
-    return write_tree(repo, kept)
+    return kept + our_entries(repo, recipe, revision)
+
+
+def recipe_tree(repo: Repo, upstream: str, recipe: Recipe, revision: str) -> str:
+    return write_tree(repo, recipe_entries(repo, upstream, recipe, revision))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -330,7 +379,7 @@ def some(paths: Sequence[str]) -> str:
 
 def verify(repo: Repo, name: str, expect: Optional[str] = None, upstream_url: str = UPSTREAM,
            prove: bool = True) -> Report:
-    """Whether `name` is a correct trimmed commit. Six rules, each reported by its own name.
+    """Whether `name` is a correct trimmed commit. Seven rules, each reported by its own name.
 
     `expect` is what the caller knows of the parents: `FIRST` for the commit `init` made, the tip the
     branch had for one `sync` made, and nothing for a commit checked on its own -- which is never
@@ -368,6 +417,7 @@ def verify(repo: Repo, name: str, expect: Optional[str] = None, upstream_url: st
     claimed = commit.trailers("Upstream")
     revisions = commit.trailers("Recipe")
     recipe = None
+    written: Dict[str, Entry] = {}
     if not parents or claimed != [parents[-1]]:
         report.refuse("record", f"its message names upstream {claimed or 'nothing'}, and its last "
                                 f"parent is {parents[-1][:12] if parents else 'absent'}")
@@ -380,6 +430,10 @@ def verify(repo: Repo, name: str, expect: Optional[str] = None, upstream_url: st
                                     f"repository: fetch the branch this tool lives on")
         else:
             recipe = parse_recipe(found.stdout.decode("utf-8"))
+            try:
+                written = {entry.path: entry for entry in our_entries(repo, recipe, revisions[0])}
+            except Refused as refusal:
+                report.refuse("record", str(refusal))
     if "record" not in report.rules():
         tags = commit.trailers("Upstream-tag")
         report.passed.append(("record", f"upstream {claimed[0][:12]}"
@@ -402,28 +456,32 @@ def verify(repo: Repo, name: str, expect: Optional[str] = None, upstream_url: st
     theirs = listing(repo, upstream)
     ours = listing(repo, commit.id)
 
-    # deletions: against the upstream parent every difference is a deletion.
-    added = sorted(path for path in ours if path not in theirs)
+    # deletions: against the upstream parent every difference is a deletion, the files of this
+    # fork's own aside -- those have a rule to themselves.
+    added = sorted(path for path in ours if path not in theirs and path not in written)
     changed = sorted(path for path, entry in ours.items()
-                     if path in theirs and theirs[path].what() != entry.what())
+                     if path in theirs and path not in written and theirs[path].what() != entry.what())
     if added:
         report.refuse("deletions", f"added: {some(added)}")
     if changed:
         report.refuse("deletions", f"changed: {some(changed)}")
     if not added and not changed:
-        report.passed.append(("deletions", f"{len(theirs) - len(ours)} of upstream's {len(theirs)} "
-                                           f"paths deleted, none added or changed"))
+        gone = sum(1 for path in theirs if path not in ours)
+        report.passed.append(("deletions", f"{gone} of upstream's {len(theirs)} paths deleted, none "
+                                           f"added or changed"))
 
     # composition: nothing outside the list, and everything it names.
-    outside = sorted(path for path, entry in ours.items() if not recipe.allows(entry))
-    absent = recipe.absent(ours.values())
+    outside = sorted(path for path, entry in ours.items()
+                     if path not in written and not recipe.allows(entry))
+    absent = sorted(recipe.absent(ours.values()) + [path for path in written if path not in ours])
     if outside:
         report.refuse("composition", f"outside the list: {some(outside)}")
     if absent:
         report.refuse("composition", f"named and absent: {some(absent)}")
     if not outside and not absent:
         report.passed.append(("composition", f"{len(ours)} paths, all in the list; all "
-                                             f"{len(recipe.named())} it names are there"))
+                                             f"{len(recipe.named()) + len(written)} it names "
+                                             f"are there"))
 
     # kept: each thing the list names is the object upstream has, mode and all.
     named = recipe.named()
@@ -437,9 +495,18 @@ def verify(repo: Repo, name: str, expect: Optional[str] = None, upstream_url: st
         report.passed.append(("kept", f"{len(recipe.trees)} trees, {len(recipe.files)} files and "
                                       f"{len(recipe.gitlinks)} gitlinks are upstream's objects"))
 
-    # And the three together are one comparison, made a second way: a disagreement between the two
+    # ours: each file of this fork's own is the text the recorded revision of the tool's branch has.
+    wrong = sorted(path for path, entry in written.items()
+                   if path in ours and ours[path].what() != entry.what())
+    if wrong:
+        report.refuse("ours", f"not the text revision {revisions[0][:12]} has: {some(wrong)}")
+    elif written and all(path in ours for path in written):
+        report.passed.append(("ours", ", ".join(f"{path} is {source} of {revisions[0][:12]}"
+                                                for path, source in recipe.ours)))
+
+    # And the four together are one comparison, made a second way: a disagreement between the two
     # is a defect in this file, and is reported rather than passed over.
-    if not report.refusals and recipe_tree(repo, upstream, recipe) != commit.tree:
+    if not report.refusals and recipe_tree(repo, upstream, recipe, revisions[0]) != commit.tree:
         report.refuse("tree", "its tree is not the one the list makes of its upstream parent, and "
                               "no rule above said why")
     return report
@@ -455,7 +522,9 @@ def tool_revision(directory: str = HERE) -> str:
     if tool.run("rev-parse", "--verify", "--quiet", "HEAD^{commit}").returncode != 0:
         raise Refused("this tool is not in a repository with a commit, so it has no revision")
     prefix = tool.git("rev-parse", "--show-prefix")
-    for name in TOOL_FILES:
+    with open(os.path.join(directory, KEPT), encoding="utf-8") as kept:
+        texts = parse_recipe(kept.read()).sources()
+    for name in (*TOOL_FILES, *texts):
         committed = tool.run("rev-parse", "--verify", "--quiet", f"HEAD:{prefix}{name}")
         if committed.returncode != 0:
             raise Refused(f"{name} is not committed on the branch checked out here")
@@ -484,7 +553,7 @@ def make(repo: Repo, upstream: str, previous: Optional[str], tag: Optional[str],
          recipe: Recipe, upstream_url: str, prove: bool = True) -> Tuple[str, Report]:
     """Build the trimmed commit of `upstream`, check it, and move the branch from `previous` to it."""
     obtain(repo, upstream, upstream_url)
-    tree = recipe_tree(repo, upstream, recipe)
+    tree = recipe_tree(repo, upstream, recipe, revision)
     if previous is not None:
         before = read_commit(repo, previous)
         if before is not None and before.tree == tree:
@@ -520,6 +589,24 @@ def sync(repo: Repo, tag: str, revision: str, recipe: Recipe, upstream_url: str 
     return make(repo, upstream, previous.id, tag, revision, recipe, upstream_url, prove)
 
 
+def remake(repo: Repo, revision: str, recipe: Recipe, upstream_url: str = UPSTREAM,
+           prove: bool = True) -> Tuple[str, Report]:
+    """The upstream commit the tip was made from, made again with the list as it is now.
+
+    For a list that changed while upstream did not: a line Tint's configure turned out to need, or
+    one it never did. The tag the tip was asked for by, if it had one, is the new commit's too.
+    """
+    previous = read_commit(repo, BRANCH)
+    if previous is None:
+        raise Refused("there is no tint-only here: fetch it, or make the first commit with `init`")
+    if not previous.parents or previous.trailers("Upstream") != [previous.parents[-1]]:
+        raise Refused("the tip of tint-only is not a trimmed commit, so it names no upstream commit "
+                      "to make again")
+    tags = previous.trailers("Upstream-tag")
+    return make(repo, previous.parents[-1], previous.id, tags[0] if tags else None, revision, recipe,
+                upstream_url, prove)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="tint_only", description="Make and check the tint-only branch of this fork of Dawn.")
@@ -528,6 +615,7 @@ def main() -> int:
     first.add_argument("--upstream", required=True, metavar="SHA", help="the upstream commit, in full")
     later = commands.add_parser("sync", help="make the next trimmed commit, from a release tag")
     later.add_argument("tag", help="one of Dawn's release tags, such as v20261002.154047")
+    commands.add_parser("remake", help="make the tip's upstream commit again, by the list as it is now")
     check = commands.add_parser("verify", help="check a trimmed commit on its own")
     check.add_argument("commit", nargs="?", default=BRANCH, help="default: tint-only")
     commands.add_parser("test", help="run the cases that hold each refusal")
@@ -554,8 +642,10 @@ def main() -> int:
         run_cases()
         if arguments.command == "init":
             commit, report = init(repo, arguments.upstream, revision, recipe)
-        else:
+        elif arguments.command == "sync":
             commit, report = sync(repo, arguments.tag, revision, recipe)
+        else:
+            commit, report = remake(repo, revision, recipe)
         print("\n".join(report.lines()))
         print(f"tint-only now names {commit}; nothing was pushed.")
         return 0
